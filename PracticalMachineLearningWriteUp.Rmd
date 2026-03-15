@@ -1,0 +1,304 @@
+---
+title: "Practical Machine Learning Course Project"
+author: "Jonathan"
+date: "2026-03-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Background
+
+This project is to predict the manner in which six participants carried out a weight lifting exercise using information gathered from accelerators on the belt,forearm, arm and dumbell of all six participants.
+
+This  R Markdown document details how a model was built and verfied using cross validation. The sample error is estimated. The prediction model is used to predict 20 different test cases. This document sets out the reasoning for the methodology and the R code used to build, assess, and outline the model.  
+
+## Packages used 
+This project will use R and the following packages 
+- caret for building and predicting models
+- dplyr for data manipulation 
+- ggplot2 for producing visualisations
+The packages are read into R using the following code: 
+```{r echo = TRUE , message=FALSE}
+  library(caret)
+  library(dplyr)
+  library(ggplot2)
+
+```
+
+## Data
+The data for this project comes from the http://groupware.les.inf.puc-rio.br/har.  The training data for the project is available at https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv.  The test data is available at https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv.
+
+The R code below downloads the test and train CSV files are stores then as data frames in R. 
+```{r echo = TRUE, messages=FALSE}
+url_train = 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv'
+url_test = 'https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv'
+download.file(url_train, destfile = 'train.csv', mode = "wb")
+download.file(url_test, destfile = 'test.csv', mode = "wb")
+train<-read.csv('train.csv')
+test<-read.csv('test.csv')
+```
+Now some assessment of the data is performed. 
+Details of the data can be found at http://groupware.les.inf.puc-rio.br/har however this website is no longer working. Consequentially certain assumptions must be made in relation to the data.  The code indicates that we have 19622 observations with 160 variables 
+
+```{r messages = TRUE}
+dim(train)
+dim(test)
+
+```
+First want to explore the data and understand which variables have useful data to help develop a predictive model. We first investigate each column to understand if the values or unique or contain NA's. Below is R code to count the number of unique values and the number of NA's for each variable.  As can be seen there are many variables where there is a significant number of NA's. For many variables (for example stdev_yaw_dumbbell) there are 19216 na's out of a possible 19622 observations.  See Appendix 
+
+```{r}
+summary_table<-data.frame(
+  variable = names(train),
+  unique_values = sapply(train, function(x) length(unique(x)) ),
+  class = sapply(train, function(x) class(x)),
+  na_count = sapply(train, function(x) sum(is.na(x)))
+)
+
+```
+
+We will exclude any variables where the number of NA's exceed a certain threshold. Let's remove any columns where the number of NA;s exceed more than 25% of the observations. This reduces our number of columns to 93. 
+
+This operation must be performed on our test set as well. 
+
+```{r}
+threshold = 0.25
+train_remove_na<- train[, colMeans(is.na(train))<=threshold]
+test_remove_na<-test[, colMeans(is.na(train))<=threshold]
+
+```
+Now will remove factor columns from the data sets.  We must first remove the output variable 'classe' from our training set as that is a factor that we will want to predict on.   We also see that in our test set we do not have the output variable classe. So our test set is for blind testing.  To estimate the out of sample error we will need to segment our training set. 
+
+```{R, echo=TRUE}
+## remove the predictor classe from the data set 
+train_y <- train_remove_na$classe
+## use dplyr to remove the column classe from our training data
+train_x <- train_remove_na %>%
+  select(-classe)
+## now find all columns that are characters and remove them from our test and train set
+char_cols<-sapply(train_x, is.character)
+  ## keep only the non character fields 
+  train_x<-train_x[,!char_cols, drop = FALSE]
+  ## check still have some columns left
+  if(ncol(train_x)==0){
+    stop("No columns remaining after removing constants - all were constant")
+  }
+  ## complete the following with our test set
+  test_x <- test_remove_na[, !char_cols, drop = FALSE]
+  
+```
+
+Now remove any constant fields from the train dataset.  Echo this operation on the test set 
+
+```{R, echo=TRUE}
+  ## find the non constant fields 
+  non_constant<-sapply(train_x, function(z) length(unique(z)) > 1)
+  ## keep only the non constant fields 
+  train_x<-train_x[, non_constant, drop = FALSE]
+  ## check still have some columns left
+  if(ncol(train_x)==0){
+    stop("No columns remaining after removing constants - all were constant")
+  }
+  test_x <- test_x[, non_constant, drop = FALSE]
+  
+```
+
+Finally we remove columns that do not add any information to outcome we are trying to predict. Removing the column X because this is an index for the observation. Also removing the columns raw_timestamp_part_1,  raw_timestamp_part_2, num_window because these columns relate, presumably, to when the measurement was taken. The timing should not infer any information to predict the quality of exercise being undertaken. 
+
+```{r}
+  ## remove the columns X, raw_timestamp_part_1, raw_timestamp_part_2, num_window from the train and test set 
+  train_x <- train_x %>%
+    select(-c(X, raw_timestamp_part_1, raw_timestamp_part_2, num_window ))
+  test_x <- test_x %>%
+    select(-c(X, raw_timestamp_part_1, raw_timestamp_part_2, num_window ))
+```
+
+## Creating training and test set 
+
+Will now use 5 - fold cross - validation to estimate out of sample - performance. Arbitrarily choosing 5 in this case. 
+First step is to recombine the predictors and the output sets 
+``` {r}
+  ## Need to combine train_x and train_y
+  data_all <- data.frame(classe = train_y, train_x)
+```
+
+Now use the caret package to perform K-fold validation to avoid overfitting.  Will choose k = 5 for this example. The caret package provides the trainControl method to do this. 
+
+
+
+```{r}
+set.seed(42)
+train_control <- trainControl(
+  method = 'cv',
+  number = 5,
+  classProbs = TRUE
+)
+```
+
+Now will perform PCA analysis to prep the data for machine learning. This will reduce the dimensional and removes the prospect of multicollinearity. PCA will be fitted to each of the 5 folds. This is automatically handled by the caret package by the preProcess variable passed to each model training step. We create a vector of these steps that will passed to caret. 
+
+```{r}
+  preProc = c("center", "scale", "pca")
+```
+
+## Fit Models
+Will now use caret train method to train models on our data set. For each model will use all predictor columns in training the model to predict the outcome classe. 
+
+Our first model will be a logit regression model.  Will use caret to fit this model each of our folds.  As indicated above will perform PCA on the fold before hand. 
+
+
+```{r}
+  model_logit <- train( 
+    classe ~ . ,
+    data= data_all,
+    method = "multinom",
+    trControl = train_control,
+    preProcess = preProc,
+    trace = FALSE)
+```
+
+Next will fit a random forest model.  Again, caret provides a unified interface to perform this using each fold with PCA performed beforehand. 
+
+```{r , warning=FALSE}
+model_rf <-train(
+  classe~.,
+  data=data_all,
+  method = "rf",
+  trControl = train_control,
+  preProcess = preProc
+)
+```
+
+Finally, will a fit a third model. Will use caret to fit a gradient boost model. Again use caret to train this model
+
+```{r messages = FALSE }
+  model_gbm <- train(
+    classe~.,
+    data = data_all,
+    method = "gbm",
+    trControl = train_control,
+    preProcess = preProc, 
+    verbose = FALSE
+  )
+```
+
+## Compare Model Performance
+We now compare the performance of the three model.  When caret fits each model it stores the performance result from each fold. We can use the resamples caret function to compare the results of each model.  A summary of the results are shown below. 
+
+This shows that the random forest model has an accuracy score of 0.97. This model significantly outperforms the logit regression model and the GBM model. 
+
+```{r}
+  results<-resamples(list(
+    Logit = model_logit,
+    RF = model_rf,
+    GBM = model_gbm
+  ))
+summary(results)
+```
+
+
+## Fit Ensemble model 
+For a multi-class problem we use the average predicted probabilities. Compute the predicted probabilities from each model on the train_data. 
+
+```{r}
+  pred_logit <- predict(model_logit, data_all, type="prob")
+  pred_rf <- predict(model_rf, data_all, type = "prob")
+  pred_gbm <- predict(model_gbm, data_all, type = "prob")
+  ## take the avearge across the three different models
+  pred_avg <- (pred_logit + pred_rf + pred_gbm) / 3
+  ## determine the class with the highest probability - this is the prediction
+  pred_final <- colnames(pred_avg)[max.col(pred_avg)]
+  
+```
+
+## Evaluate the Final Model
+Will use a confusion matrix to evaluate the final model. 
+```{r}
+  confusionMatrix(factor(pred_final), as.factor(data_all$classe))
+```
+
+The accuracy of this ensemble model is worse than that for the random forest model.  Will also create a confusion matrix to evaluate the random forest model. The question is whether we get a better outcome if we use the random forest model or use the ensemble model? 
+
+```{r}
+pred_outcomes_rf <- colnames(pred_rf)[max.col(pred_rf)]
+  confusionMatrix(factor(pred_outcomes_rf), as.factor(data_all$classe))
+```
+The random forest model is performing exceptionally well here.  Need to consider the importance of each variable. There may be some dataleakage that the model is using that predicts the outcome of the model. Need to be careful here because the description of the data is not available so some data recording process captured in the data may be contributing to model. Will plot the importance of each variable using Caret's varImp function. We used PCA to prep the data so need to determine the approximate importance before PCA to make the variables understandable.
+
+```{r echo = TRUE}
+
+
+## 1. Extract PCA loadings
+loadings <- model_rf$preProcess$rotation
+# rows   = original variables
+# cols   = principal components
+
+## 2. Extract variable importance for the PCA variables
+pc_imp_df <- varImp(model_rf)$importance
+
+## 3. Convert to a named numeric vector
+pc_imp <- pc_imp_df$Overall
+names(pc_imp) <- rownames(pc_imp_df)
+
+## 4. Check names
+print(colnames(loadings))
+print(names(pc_imp))
+
+## 5. Keep only principal components that exist in both objects
+common_pcs <- intersect(colnames(loadings), names(pc_imp))
+
+if (length(common_pcs) == 0) {
+  stop("No matching principal component names found between loadings and variable importance.")
+}
+
+## 6. Align both objects to the same PCs
+loadings_aligned <- loadings[, common_pcs, drop = FALSE]
+pc_imp_aligned <- pc_imp[common_pcs]
+
+## 7. Compute approximate importance for original variables
+##    Use absolute loadings so large positive/negative contributions both count
+orig_imp_matrix <- abs(loadings_aligned) %*% pc_imp_aligned
+
+## 8. Convert to a clean data frame
+orig_imp <- data.frame(
+  Variable = rownames(loadings_aligned),
+  Importance = as.numeric(orig_imp_matrix),
+  row.names = NULL
+)
+
+## 9. Sort descending
+orig_imp <- orig_imp[order(-orig_imp$Importance), ]
+
+## 10. Plot top 20 variables
+ggplot(orig_imp[1:20, ], aes(x = reorder(Variable, Importance), y = Importance)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(
+    title = "Approximate Original Variable Importance from PCA-Based Random Forest",
+    x = "Original Variable",
+    y = "Approximate Importance"
+  ) +
+  theme_minimal()
+```
+
+In particular none of the variables would be suggestive of fields that relate to how the data was recorded.  The model is determined to be appropriate. 
+
+## Predict the Outcomes
+Will choose the random forest model as our predictor.  We will use this model on the test data to predict the outcomes. The code below will create the predicted output. 
+
+
+```{r}
+   pred_rf_test <- predict(model_rf, test_x, type = "prob")
+   pred_test <- colnames(pred_avg)[max.col(pred_rf_test)]
+   pred_test
+```
+## Appendix 
+
+Summary of the Data.
+
+```{r}
+summary_table
+```
